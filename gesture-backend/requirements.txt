@@ -1,4 +1,4 @@
 numpy>=2.1,<3
-opencv-python>=4.13
+opencv-python-headless>=4.13
 mediapipe>=0.10.35
 websockets>=16
