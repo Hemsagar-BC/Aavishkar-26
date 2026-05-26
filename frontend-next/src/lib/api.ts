@@ -29,7 +29,10 @@ export function getApiBaseUrl(): string {
     return LOCAL_API_FALLBACK;
 }
 
-export function getBackendBaseUrl(): string {
-    const apiBase = getApiBaseUrl();
-    return apiBase.replace(/\/api$/i, "");
+// export function getBackendBaseUrl(): string {
+//     const apiBase = getApiBaseUrl();
+//     return apiBase.replace(/\/api$/i, "");
+// }
+export function getBackendBaseUrl() {
+  return "http://172.16.16.166:8001";  // your laptop's IP
 }

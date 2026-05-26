@@ -22,6 +22,7 @@ import {
   FileText,
   BarChart3,
   ClipboardCheck,
+  Camera,
   Moon,
   Sun,
   LogOut,
@@ -40,6 +41,7 @@ const featureLinks = [
   { label: "Generator", href: "/generator", icon: <FileText size={20} /> },
   { label: "Progress Analytics", href: "/analytics", icon: <BarChart3 size={20} /> },
   { label: "Games", href: "/games", icon: <Gamepad2 size={20} /> },
+  { label: "OPENCV", href: "/opencv", icon: <Camera size={20} /> },
   { label: "Screening Assessment", href: "/onboarding", icon: <ClipboardCheck size={20} /> },
 ];
 

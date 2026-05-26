@@ -26,14 +26,17 @@ import asyncio
 import json
 import threading
 import traceback
+import hashlib
+from uuid import uuid4
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 try:
-    from PIL import Image, ImageEnhance, ImageFilter
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 except ImportError:
     Image = None
     ImageEnhance = None
     ImageFilter = None
+    ImageOps = None
     print("[WARNING] Pillow not installed -- handwriting image enhancement disabled")
 
 from app.routers import assessment as assessment_router
@@ -48,8 +51,117 @@ _last_vision_call = 0
 MIN_CALL_INTERVAL = 1  # 1s stagger for text API
 MIN_VISION_INTERVAL = 3  # 3s minimum for Vision API (free tier is very limited)
 
+# Simple in-memory cache for repeated handwriting uploads (demo-friendly)
+HANDWRITING_CACHE_TTL_SECONDS = int(os.getenv("HANDWRITING_CACHE_TTL_SECONDS", "900"))
+HANDWRITING_CACHE_MAX_ENTRIES = int(os.getenv("HANDWRITING_CACHE_MAX_ENTRIES", "200"))
+HANDWRITING_CACHE_FILE = None
+_handwriting_cache = {}
+_handwriting_cache_lock = threading.Lock()
+
+def _handwriting_cache_key(file_bytes: bytes) -> str:
+    if Image is not None and ImageOps is not None:
+        try:
+            img = Image.open(BytesIO(file_bytes))
+            img = ImageOps.exif_transpose(img)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img = img.resize((512, 512))
+            return hashlib.sha256(img.tobytes()).hexdigest()
+        except Exception:
+            pass
+    return hashlib.sha256(file_bytes).hexdigest()
+
+def _get_handwriting_cache(key: str):
+    now = time.time()
+    with _handwriting_cache_lock:
+        entry = _handwriting_cache.get(key)
+        if not entry:
+            return None
+        age = now - entry["created_at"]
+        if age > HANDWRITING_CACHE_TTL_SECONDS:
+            _handwriting_cache.pop(key, None)
+            return None
+        return {"result": entry["result"], "age": age}
+
+def _prune_handwriting_cache(now: float = None):
+    if now is None:
+        now = time.time()
+    expired_keys = [
+        key for key, entry in _handwriting_cache.items()
+        if now - entry.get("created_at", 0) > HANDWRITING_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _handwriting_cache.pop(key, None)
+
+    while len(_handwriting_cache) > HANDWRITING_CACHE_MAX_ENTRIES:
+        oldest_key = min(_handwriting_cache, key=lambda k: _handwriting_cache[k]["created_at"])
+        _handwriting_cache.pop(oldest_key, None)
+
+def _set_handwriting_cache(key: str, result: dict):
+    now = time.time()
+    with _handwriting_cache_lock:
+        _handwriting_cache[key] = {"result": result, "created_at": now}
+        _prune_handwriting_cache(now)
+        _persist_handwriting_cache_to_disk()
+
+def _persist_handwriting_cache_to_disk():
+    if not HANDWRITING_CACHE_FILE:
+        return
+    try:
+        cache_dir = os.path.dirname(HANDWRITING_CACHE_FILE)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        data = {"entries": _handwriting_cache}
+        temp_path = f"{HANDWRITING_CACHE_FILE}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(temp_path, HANDWRITING_CACHE_FILE)
+    except Exception as exc:
+        print(f"[WARN] Failed to persist handwriting cache: {exc}")
+
+def _load_handwriting_cache_from_disk():
+    if not HANDWRITING_CACHE_FILE:
+        return
+    if not os.path.exists(HANDWRITING_CACHE_FILE):
+        return
+    try:
+        with open(HANDWRITING_CACHE_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle) or {}
+        entries = data.get("entries", {})
+        if not isinstance(entries, dict):
+            return
+        now = time.time()
+        with _handwriting_cache_lock:
+            _handwriting_cache.clear()
+            for key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    continue
+                created_at = entry.get("created_at")
+                result = entry.get("result")
+                if not isinstance(created_at, (int, float)):
+                    continue
+                if now - created_at > HANDWRITING_CACHE_TTL_SECONDS:
+                    continue
+                _handwriting_cache[key] = {"result": result, "created_at": created_at}
+            _prune_handwriting_cache(now)
+        print(f"[CACHE] Loaded {len(_handwriting_cache)} handwriting entries from disk")
+    except Exception as exc:
+        print(f"[WARN] Failed to load handwriting cache: {exc}")
+
 # Load environment variables
 load_dotenv()
+
+HANDWRITING_CACHE_TTL_SECONDS = int(
+    os.getenv("HANDWRITING_CACHE_TTL_SECONDS", str(HANDWRITING_CACHE_TTL_SECONDS))
+)
+HANDWRITING_CACHE_MAX_ENTRIES = int(
+    os.getenv("HANDWRITING_CACHE_MAX_ENTRIES", str(HANDWRITING_CACHE_MAX_ENTRIES))
+)
+HANDWRITING_CACHE_FILE = os.getenv(
+    "HANDWRITING_CACHE_FILE",
+    os.path.join(os.path.dirname(__file__), "handwriting_cache.json"),
+)
+_load_handwriting_cache_from_disk()
 
 # Initialize FastAPI
 app = FastAPI(title="NeuroLex Backend")
@@ -59,46 +171,59 @@ app = FastAPI(title="NeuroLex Backend")
 # Using regex pattern to allow all Vercel domains
 import re
 
-allowed_origin_patterns = [
-    r"http://localhost:\d+",  # Local development
-    r"https://.*\.vercel\.app",  # All Vercel deployments
-    r"https://.*-pushkarrds-projects\.vercel\.app",  # Your Vercel account
-]
+# allowed_origin_patterns = [
+#     r"http://localhost:\d+",  # Local development
+#     r"https://.*\.vercel\.app",  # All Vercel deployments
+#     r"https://.*-pushkarrds-projects\.vercel\.app",  # Your Vercel account
+# ]
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
-def is_allowed_origin(origin: str) -> bool:
-    """Check if origin matches allowed patterns"""
-    if not origin:
-        return False
-    for pattern in allowed_origin_patterns:
-        if re.match(pattern, origin):
-            return True
-    return False
+# def is_allowed_origin(origin: str) -> bool:
+#     """Check if origin matches allowed patterns"""
+#     if not origin:
+#         return False
+#     for pattern in allowed_origin_patterns:
+#         if re.match(pattern, origin):
+#             return True
+#     return False
 
-# Custom CORS handler
-@app.middleware("http")
-async def cors_handler(request: Request, call_next):
-    origin = request.headers.get("origin", "")
+# # Custom CORS handler
+# @app.middleware("http")
+# async def cors_handler(request: Request, call_next):
+#     origin = request.headers.get("origin", "")
     
-    response = await call_next(request)
+#     response = await call_next(request)
     
-    # Add CORS headers if origin is allowed
-    if is_allowed_origin(origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "*"
+#     # Add CORS headers if origin is allowed
+#     if is_allowed_origin(origin):
+#         response.headers["Access-Control-Allow-Origin"] = origin
+#         response.headers["Access-Control-Allow-Credentials"] = "true"
+#         response.headers["Access-Control-Allow-Methods"] = "*"
+#         response.headers["Access-Control-Allow-Headers"] = "*"
     
-    return response
+#     return response
 
-# Handle preflight requests
+# # Handle preflight requests
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origin_regex=r"https://.*\.vercel\.app|http://localhost:\d+",
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.vercel\.app|http://localhost:\d+",
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Initialize Firebase Admin SDK (graceful fallback)
 # If Firebase credentials are missing in deployment env, keep API running and
 # skip Firestore writes instead of crashing the whole service.
@@ -128,6 +253,60 @@ try:
 except Exception as firebase_err:
     db = None
     print(f"[WARNING] Firebase init failed: {firebase_err}. Continuing without Firestore logging.")
+
+# In-memory fallback store when Firestore is unavailable
+_lecture_store = {}
+_lecture_store_lock = threading.Lock()
+
+def _lecture_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+def _create_lecture_fallback(user_id: str, transcription: str) -> dict:
+    lecture_id = uuid4().hex
+    now = _lecture_now()
+    lecture = {
+        "id": lecture_id,
+        "userId": user_id,
+        "transcription": transcription,
+        "simpleText": "",
+        "detailedSteps": "",
+        "mindMap": "",
+        "summary": "",
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    with _lecture_store_lock:
+        _lecture_store[lecture_id] = lecture
+    return lecture
+
+def _get_lecture_fallback(lecture_id: str) -> Optional[dict]:
+    with _lecture_store_lock:
+        lecture = _lecture_store.get(lecture_id)
+        return dict(lecture) if lecture else None
+
+def _update_lecture_fallback(lecture_id: str, updates: dict) -> Optional[dict]:
+    with _lecture_store_lock:
+        lecture = _lecture_store.get(lecture_id)
+        if not lecture:
+            return None
+        lecture.update(updates)
+        lecture["updatedAt"] = _lecture_now()
+        _lecture_store[lecture_id] = lecture
+        return dict(lecture)
+
+def _delete_lecture_fallback(lecture_id: str) -> bool:
+    with _lecture_store_lock:
+        return _lecture_store.pop(lecture_id, None) is not None
+
+def _get_user_lectures_fallback(user_id: str) -> list:
+    with _lecture_store_lock:
+        lectures = [dict(v) for v in _lecture_store.values() if v.get("userId") == user_id]
+    lectures.sort(key=lambda l: l.get("createdAt") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return lectures
+
+def _get_latest_lecture_fallback(user_id: str) -> Optional[dict]:
+    lectures = _get_user_lectures_fallback(user_id)
+    return lectures[0] if lectures else None
 
 # Register assessment screening router
 app.include_router(assessment_router.router)
@@ -589,21 +768,30 @@ def generate_with_gemini(prompt: str, system: str = None, stream: bool = False) 
 async def create_lecture(lecture: LectureCreate):
     """Create a new lecture with transcription"""
     try:
-        lecture_data = {
-            "userId": lecture.userId,
-            "transcription": lecture.transcription,
-            "simpleText": "",
-            "detailedSteps": "",
-            "mindMap": "",
-            "summary": "",
-            "createdAt": datetime.now(),
-            "updatedAt": datetime.now()
-        }
-        
-        doc_ref = db.collection("lectures").document()
-        doc_ref.set(lecture_data)
-        
-        return {"id": doc_ref.id, **lecture_data}
+        if db is None:
+            lecture_data = _create_lecture_fallback(lecture.userId, lecture.transcription)
+            return lecture_data
+
+        try:
+            lecture_data = {
+                "userId": lecture.userId,
+                "transcription": lecture.transcription,
+                "simpleText": "",
+                "detailedSteps": "",
+                "mindMap": "",
+                "summary": "",
+                "createdAt": datetime.now(),
+                "updatedAt": datetime.now()
+            }
+
+            doc_ref = db.collection("lectures").document()
+            doc_ref.set(lecture_data)
+
+            return {"id": doc_ref.id, **lecture_data}
+        except Exception as firestore_err:
+            print(f"[WARN] Firestore create failed, using fallback: {firestore_err}")
+            lecture_data = _create_lecture_fallback(lecture.userId, lecture.transcription)
+            return lecture_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -611,12 +799,27 @@ async def create_lecture(lecture: LectureCreate):
 async def get_lecture(lecture_id: str):
     """Get a specific lecture"""
     try:
-        doc = db.collection("lectures").document(lecture_id).get()
-        if not doc.exists:
-            raise HTTPException(status_code=404, detail="Lecture not found")
-        
-        data = doc.to_dict()
-        return {"id": doc.id, **data}
+        if db is None:
+            lecture_data = _get_lecture_fallback(lecture_id)
+            if not lecture_data:
+                raise HTTPException(status_code=404, detail="Lecture not found")
+            return lecture_data
+
+        try:
+            doc = db.collection("lectures").document(lecture_id).get()
+            if not doc.exists:
+                raise HTTPException(status_code=404, detail="Lecture not found")
+
+            data = doc.to_dict()
+            return {"id": doc.id, **data}
+        except HTTPException:
+            raise
+        except Exception as firestore_err:
+            print(f"[WARN] Firestore fetch failed, using fallback: {firestore_err}")
+            lecture_data = _get_lecture_fallback(lecture_id)
+            if lecture_data:
+                return lecture_data
+            raise HTTPException(status_code=500, detail=str(firestore_err))
     except HTTPException:
         raise
     except Exception as e:
@@ -626,6 +829,12 @@ async def get_lecture(lecture_id: str):
 async def get_latest_lecture(user_id: str):
     """Get the latest lecture for a user"""
     try:
+        if db is None:
+            lecture_data = _get_latest_lecture_fallback(user_id)
+            if lecture_data:
+                return lecture_data
+            raise HTTPException(status_code=404, detail="No lectures found")
+
         # Prefer server-side ordering for performance, but gracefully fallback if
         # the required composite index is missing.
         try:
@@ -669,6 +878,14 @@ async def get_latest_lecture(user_id: str):
         raise HTTPException(status_code=404, detail="No lectures found")
     except HTTPException:
         raise
+    except Exception as firestore_err:
+        print(f"[WARN] Firestore latest lookup failed, using fallback: {firestore_err}")
+        lecture_data = _get_latest_lecture_fallback(user_id)
+        if lecture_data:
+            return lecture_data
+        raise HTTPException(status_code=500, detail=str(firestore_err))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -677,11 +894,23 @@ async def process_lecture(lecture_id: str):
     """Process lecture transcription through Gemini AI with chunking for faster processing"""
     try:
         # Get the lecture
-        doc = db.collection("lectures").document(lecture_id).get()
-        if not doc.exists:
-            raise HTTPException(status_code=404, detail="Lecture not found")
-        
-        data = doc.to_dict()
+        if db is None:
+            data = _get_lecture_fallback(lecture_id)
+            if not data:
+                raise HTTPException(status_code=404, detail="Lecture not found")
+        else:
+            try:
+                doc = db.collection("lectures").document(lecture_id).get()
+                if not doc.exists:
+                    raise HTTPException(status_code=404, detail="Lecture not found")
+                data = doc.to_dict()
+            except HTTPException:
+                raise
+            except Exception as firestore_err:
+                print(f"[WARN] Firestore fetch failed, using fallback: {firestore_err}")
+                data = _get_lecture_fallback(lecture_id)
+                if not data:
+                    raise HTTPException(status_code=500, detail=str(firestore_err))
         transcription = data.get("transcription", "")
         
         if not transcription:
@@ -779,7 +1008,14 @@ Summary:"""
             "processingErrors": generation_errors,
         }
         
-        db.collection("lectures").document(lecture_id).update(update_data)
+        if db is None:
+            _update_lecture_fallback(lecture_id, update_data)
+        else:
+            try:
+                db.collection("lectures").document(lecture_id).update(update_data)
+            except Exception as firestore_err:
+                print(f"[WARN] Firestore update failed, using fallback: {firestore_err}")
+                _update_lecture_fallback(lecture_id, update_data)
         
         print("Done! Saved to Firestore.")
         return {
@@ -805,12 +1041,25 @@ async def update_lecture(lecture_id: str, updates: LectureUpdate):
     try:
         update_data = {k: v for k, v in updates.dict().items() if v is not None}
         update_data["updatedAt"] = datetime.now()
-        
-        db.collection("lectures").document(lecture_id).update(update_data)
-        
-        doc = db.collection("lectures").document(lecture_id).get()
-        data = doc.to_dict()
-        return {"id": doc.id, **data}
+
+        if db is None:
+            lecture_data = _update_lecture_fallback(lecture_id, update_data)
+            if not lecture_data:
+                raise HTTPException(status_code=404, detail="Lecture not found")
+            return lecture_data
+
+        try:
+            db.collection("lectures").document(lecture_id).update(update_data)
+
+            doc = db.collection("lectures").document(lecture_id).get()
+            data = doc.to_dict()
+            return {"id": doc.id, **data}
+        except Exception as firestore_err:
+            print(f"[WARN] Firestore update failed, using fallback: {firestore_err}")
+            lecture_data = _update_lecture_fallback(lecture_id, update_data)
+            if not lecture_data:
+                raise HTTPException(status_code=500, detail=str(firestore_err))
+            return lecture_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -818,8 +1067,19 @@ async def update_lecture(lecture_id: str, updates: LectureUpdate):
 async def delete_lecture(lecture_id: str):
     """Delete a lecture"""
     try:
-        db.collection("lectures").document(lecture_id).delete()
-        return {"message": "Lecture deleted successfully"}
+        if db is None:
+            if not _delete_lecture_fallback(lecture_id):
+                raise HTTPException(status_code=404, detail="Lecture not found")
+            return {"message": "Lecture deleted successfully"}
+
+        try:
+            db.collection("lectures").document(lecture_id).delete()
+            return {"message": "Lecture deleted successfully"}
+        except Exception as firestore_err:
+            print(f"[WARN] Firestore delete failed, using fallback: {firestore_err}")
+            if not _delete_lecture_fallback(lecture_id):
+                raise HTTPException(status_code=500, detail=str(firestore_err))
+            return {"message": "Lecture deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -827,6 +1087,9 @@ async def delete_lecture(lecture_id: str):
 async def get_user_lectures(user_id: str):
     """Get all lectures for a user"""
     try:
+        if db is None:
+            return _get_user_lectures_fallback(user_id)
+
         lectures = []
 
         try:
@@ -861,8 +1124,9 @@ async def get_user_lectures(user_id: str):
             lectures.sort(key=_lecture_created_at_sort_key, reverse=True)
         
         return lectures
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as firestore_err:
+        print(f"[WARN] Firestore user lectures failed, using fallback: {firestore_err}")
+        return _get_user_lectures_fallback(user_id)
 
 @app.post("/api/transcribe-audio")
 async def transcribe_audio(file: UploadFile = File(...)):
@@ -985,6 +1249,15 @@ async def analyze_handwriting(file: UploadFile = File(...), userId: str = "anony
         # Validate file size (50 MB limit)
         if len(file_content) > 50 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size exceeds 50 MB limit.")
+
+        cache_key = _handwriting_cache_key(file_content)
+        cached = _get_handwriting_cache(cache_key)
+        if cached:
+            cached_result = dict(cached["result"])
+            cached_result["cached"] = True
+            cached_result["cacheAgeSec"] = round(cached["age"], 1)
+            print(f"[CACHE] Handwriting hit ({cached_result['cacheAgeSec']}s old)")
+            return cached_result
         
         # ── Enhance image for better OCR ──────────────────────────────────
         try:
@@ -1310,6 +1583,9 @@ Score each category independently (NOT all same scores). Find and flag spelling 
             })
         except Exception as save_err:
             print(f"Failed to save handwriting result: {save_err}")
+
+        result["cached"] = False
+        _set_handwriting_cache(cache_key, result)
         
         return result
         

@@ -21,6 +21,22 @@ import {
 } from '@/services/backendApi';
 import { logLectureSession } from '@/services/progressService';
 
+const PROCESS_TIMEOUT_MS = 120000;
+const LOAD_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
+
 export default function LecturePage() {
   const { isDark } = useTheme();
   const { currentUser } = useAuth();
@@ -212,19 +228,41 @@ export default function LecturePage() {
     try {
       setProcessingStage('Processing lecture through AI...');
 
-      // Call backend API to process all stages
-      const result = await processLecture(lectureId);
+      const result = await withTimeout(
+        processLecture(lectureId),
+        PROCESS_TIMEOUT_MS,
+        'Processing timed out. Checking for saved results...'
+      );
 
-      // Update local state with results
-      setBreakdownText(result.simpleText);
-      setDetailedSteps(result.detailedSteps);
-      setMindMap(result.mindMap);
-      setSummary(result.summary);
+      if (result && (result.simpleText || result.detailedSteps || result.mindMap || result.summary)) {
+        setBreakdownText(result.simpleText || '');
+        setDetailedSteps(result.detailedSteps || '');
+        setMindMap(result.mindMap || '');
+        setSummary(result.summary || '');
+        setProcessingStage('Processing complete!');
+        return;
+      }
 
-      setProcessingStage('Processing complete!');
+      setProcessingStage('Checking for saved results...');
+      const lecture = await withTimeout(
+        getLecture(lectureId),
+        LOAD_TIMEOUT_MS,
+        'Unable to load processed results.'
+      );
+
+      if (lecture) {
+        setBreakdownText(lecture.simpleText || '');
+        setDetailedSteps(lecture.detailedSteps || '');
+        setMindMap(lecture.mindMap || '');
+        setSummary(lecture.summary || '');
+        setProcessingStage('Processing complete!');
+      } else {
+        setProcessingStage('Processing complete, but no results were returned.');
+      }
     } catch (error) {
       console.error('Error processing transcription:', error);
-      setProcessingStage('Error processing. Please try again.');
+      const message = error instanceof Error ? error.message : 'Error processing. Please try again.';
+      setProcessingStage(message);
     } finally {
       setLoadingBreakdown(false);
       setLoadingSteps(false);
@@ -237,14 +275,38 @@ export default function LecturePage() {
     }
   }, []);
 
-  // Handle recording complete - save to Firestore and auto-process
-  const handleRecordingComplete = useCallback(async (audioBlob: Blob, transcription: string) => {
-    if (!currentUser) {
-      setProcessingStage('Please log in to save your recording');
+  const handleProcessClick = useCallback(async () => {
+    if (isRecording) {
+      return;
+    }
+
+    const text = (liveTranscription || '').trim();
+    if (!text) {
+      setProcessingStage('No transcription available to process');
       setTimeout(() => setProcessingStage(''), 3000);
       return;
     }
 
+    try {
+      if (currentLectureId) {
+        await processTranscription(currentLectureId);
+        return;
+      }
+
+      setProcessingStage('Saving transcription...');
+      const userId = currentUser?.uid || 'anonymous';
+      const lectureId = await createLecture(userId, text);
+      setCurrentLectureId(lectureId);
+      await processTranscription(lectureId);
+    } catch (error) {
+      console.error('Error processing lecture:', error);
+      setProcessingStage('Error processing. Please try again.');
+      setTimeout(() => setProcessingStage(''), 3000);
+    }
+  }, [currentLectureId, currentUser, isRecording, liveTranscription, processTranscription]);
+
+  // Handle recording complete - save to Firestore and auto-process
+  const handleRecordingComplete = useCallback(async (audioBlob: Blob, transcription: string) => {
     if (!transcription || !transcription.trim()) {
       setProcessingStage('No speech detected. Please try speaking again.');
       setTimeout(() => setProcessingStage(''), 3000);
@@ -254,11 +316,14 @@ export default function LecturePage() {
     try {
       // Save transcription to Firestore
       setProcessingStage('Saving transcription...');
-      const lectureId = await createLecture(currentUser.uid, transcription);
+      const userId = currentUser?.uid || 'anonymous';
+      const lectureId = await createLecture(userId, transcription);
       setCurrentLectureId(lectureId);
 
       // Track lecture creation in Firebase
-      logLectureSession(currentUser.uid, { lectureId });
+      if (currentUser?.uid) {
+        logLectureSession(currentUser.uid, { lectureId });
+      }
 
       // Auto-trigger AI processing immediately after saving
       setProcessingStage('Processing with AI...');
@@ -281,9 +346,9 @@ export default function LecturePage() {
             <div className={`reading-content whitespace-pre-wrap ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {liveTranscription || 'Start recording to see live transcription...'}
             </div>
-            {liveTranscription && currentLectureId && !isRecording && (
+            {liveTranscription && !isRecording && (
               <button
-                onClick={() => processTranscription(currentLectureId)}
+                onClick={handleProcessClick}
                 className={`mt-4 px-6 py-2 rounded-lg font-medium transition-all ${isDark
                   ? 'bg-blue-600 hover:bg-blue-700 text-white'
                   : 'bg-blue-500 hover:bg-blue-600 text-white'
@@ -426,14 +491,18 @@ export default function LecturePage() {
           </motion.div>
 
           {/* Processing Status */}
-          {isProcessing && (
+          {(isProcessing || processingStage) && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
               className={`mb-6 p-4 rounded-lg ${isDark ? 'bg-blue-500/20 border border-blue-500/50' : 'bg-blue-100 border border-blue-300'}`}
             >
               <div className="flex items-center gap-3">
-                <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                {isProcessing ? (
+                  <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                ) : (
+                  <div className={`w-2.5 h-2.5 rounded-full ${isDark ? 'bg-blue-300' : 'bg-blue-600'}`}></div>
+                )}
                 <span className={isDark ? 'text-blue-200' : 'text-blue-900'}>{processingStage}</span>
               </div>
             </motion.div>

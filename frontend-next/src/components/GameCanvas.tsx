@@ -30,7 +30,7 @@ export function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const animationIdRef = useRef<number>();
+  const animationIdRef = useRef<number | null>(null);
   const lastSpawnRef = useRef(0);
   const trailRef = useRef<Array<{ x: number; y: number }>>([]);
   const lastCursorRef = useRef<{ x: number; y: number } | null>(null);
