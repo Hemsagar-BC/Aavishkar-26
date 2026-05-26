@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import json
 import math
 import os
+import random
 import time
 import urllib.request
 from typing import Set, Optional, Tuple
@@ -9,12 +11,197 @@ from typing import Set, Optional, Tuple
 import cv2
 import websockets
 
-MODEL_PATH = "hand_landmarker.task"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+HOST = os.environ.get("HOST", "0.0.0.0")
+
+def get_port(default: int = 8765) -> int:
+    raw = os.environ.get("PORT")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+PORT = get_port()
+CANVAS_WIDTH = 640
+CANVAS_HEIGHT = 480
+MAX_MISSES = 5
+FRUIT_LETTERS = ["A", "B", "C", "D", "E"]
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17),
+]
+FINGERTIPS = [4, 8, 12, 16, 20]
 
 connected_clients: Set[websockets.WebSocketServerProtocol] = set()
 last_position = {"x": 0.5, "y": 0.5, "confidence": 0.0}
 running = True
+
+
+class GestureSliceGame:
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.score = 0
+        self.missed = 0
+        self.trail_points = []
+        self.fruits = []
+        self.last_spawn_time = time.time()
+        self.game_over = False
+        self.feedback = ""
+        self.feedback_timer = 0
+
+    def create_fruit(self) -> dict:
+        x = random.randint(100, CANVAS_WIDTH - 100)
+        is_bomb = random.randint(1, 5) == 1
+
+        return {
+            "x": x,
+            "y": CANVAS_HEIGHT,
+            "radius": 40 if is_bomb else 35,
+            "speed": random.randint(8, 12),
+            "letter": "X" if is_bomb else random.choice(FRUIT_LETTERS),
+            "sliced": False,
+            "type": "bomb" if is_bomb else "fruit",
+        }
+
+    def maybe_spawn(self) -> None:
+        if self.game_over:
+            return
+
+        current_time = time.time()
+        if current_time - self.last_spawn_time > 1.5:
+            self.fruits.append(self.create_fruit())
+            self.last_spawn_time = current_time
+
+    def draw_ui(self, frame) -> None:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (CANVAS_WIDTH, 80), (30, 30, 30), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+        cv2.putText(frame, "OpenCV Gesture Slice", (135, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 3)
+        cv2.putText(frame, f"Score: {self.score}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame, f"Misses: {self.missed}/{MAX_MISSES}", (405, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+    def draw_fruits(self, frame) -> None:
+        remove_list = []
+
+        for fruit in self.fruits:
+            if fruit["sliced"]:
+                remove_list.append(fruit)
+                continue
+
+            fruit["y"] -= fruit["speed"]
+            fruit["speed"] -= 0.25
+
+            color = (0, 0, 255) if fruit["type"] == "bomb" else (0, 140, 255)
+            if fruit["type"] == "bomb" and int(time.time() * 5) % 2 == 0:
+                color = (255, 255, 255)
+
+            cv2.circle(frame, (fruit["x"], int(fruit["y"])), fruit["radius"], color, cv2.FILLED)
+            cv2.circle(frame, (fruit["x"], int(fruit["y"])), fruit["radius"], (255, 255, 255), 3)
+            cv2.putText(
+                frame,
+                fruit["letter"],
+                (fruit["x"] - 15, int(fruit["y"] + 12)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.5,
+                (255, 255, 255),
+                4,
+            )
+
+            if fruit["y"] > CANVAS_HEIGHT + fruit["radius"]:
+                remove_list.append(fruit)
+                if fruit["type"] == "fruit":
+                    self.missed += 1
+
+        for fruit in remove_list:
+            if fruit in self.fruits:
+                self.fruits.remove(fruit)
+
+    def draw_trail(self, frame) -> None:
+        for index in range(1, len(self.trail_points)):
+            cv2.line(frame, self.trail_points[index - 1], self.trail_points[index], (255, 255, 0), 5)
+
+    def check_slice(self, cursor_x: int, cursor_y: int) -> None:
+        for fruit in self.fruits:
+            if fruit["sliced"]:
+                continue
+
+            distance = math.hypot(cursor_x - fruit["x"], cursor_y - fruit["y"])
+            if distance >= fruit["radius"]:
+                continue
+
+            fruit["sliced"] = True
+            if fruit["type"] == "bomb":
+                self.score -= 5
+                self.missed += 1
+                self.feedback = "BOMB HIT!"
+                self.feedback_timer = 30
+            else:
+                self.score += 1
+                self.feedback = "GOOD!"
+                self.feedback_timer = 20
+
+    def draw_feedback(self, frame) -> None:
+        if self.feedback_timer <= 0:
+            return
+
+        color = (0, 0, 255) if "BOMB" in self.feedback else (0, 255, 0)
+        cv2.putText(frame, self.feedback, (220, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.3, color, 4)
+        self.feedback_timer -= 1
+
+    def draw_game_over(self, frame) -> None:
+        if not self.game_over:
+            return
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (80, 120), (560, 360), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        cv2.putText(frame, "GAME OVER", (180, 200), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
+        cv2.putText(frame, f"Final Score: {self.score}", (180, 280), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        cv2.putText(frame, "Click Restart", (200, 340), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
+
+    def update(self, frame, cursor: Optional[Tuple[int, int]]) -> None:
+        if self.missed >= MAX_MISSES:
+            self.game_over = True
+
+        self.maybe_spawn()
+        self.draw_ui(frame)
+        self.draw_fruits(frame)
+
+        if cursor and not self.game_over:
+            cursor_x, cursor_y = cursor
+            cv2.circle(frame, (cursor_x, cursor_y), 18, (255, 255, 0), cv2.FILLED)
+            cv2.circle(frame, (cursor_x, cursor_y), 28, (255, 255, 255), 2)
+            self.trail_points.append((cursor_x, cursor_y))
+            if len(self.trail_points) > 15:
+                self.trail_points.pop(0)
+            self.draw_trail(frame)
+            self.check_slice(cursor_x, cursor_y)
+
+        self.draw_feedback(frame)
+        self.draw_game_over(frame)
+
+    def state(self) -> dict:
+        return {
+            "score": self.score,
+            "missed": self.missed,
+            "maxMisses": MAX_MISSES,
+            "gameOver": self.game_over,
+            "feedback": self.feedback if self.feedback_timer > 0 else "",
+        }
+
+
+game = GestureSliceGame()
 
 
 def ensure_model_file() -> None:
@@ -94,6 +281,16 @@ def extract_tasks_coords(mp, result) -> Optional[dict]:
     return normalize_coords(landmark.x, landmark.y, confidence)
 
 
+def extract_tasks_points(result, width: int, height: int) -> Optional[dict]:
+    if not result.hand_landmarks:
+        return None
+
+    return {
+        index: (int(landmark.x * width), int(landmark.y * height))
+        for index, landmark in enumerate(result.hand_landmarks[0])
+    }
+
+
 def extract_solutions_coords(results) -> Optional[dict]:
     if not results.multi_hand_landmarks:
         return None
@@ -104,6 +301,49 @@ def extract_solutions_coords(results) -> Optional[dict]:
         confidence = results.multi_handedness[0].classification[0].score
 
     return normalize_coords(fingertip.x, fingertip.y, confidence)
+
+
+def extract_solutions_points(results, width: int, height: int) -> Optional[dict]:
+    if not results.multi_hand_landmarks:
+        return None
+
+    return {
+        index: (int(landmark.x * width), int(landmark.y * height))
+        for index, landmark in enumerate(results.multi_hand_landmarks[0].landmark)
+    }
+
+
+def draw_hand_landmarks(frame, points: Optional[dict]) -> Optional[Tuple[int, int]]:
+    if not points:
+        return None
+
+    raised_fingers = []
+    for tip, pip in [(8, 6), (12, 10), (16, 14), (20, 18)]:
+        if tip in points and pip in points and points[tip][1] < points[pip][1]:
+            raised_fingers.append(tip)
+
+    for start, end in HAND_CONNECTIONS:
+        if start in points and end in points:
+            cv2.line(frame, points[start], points[end], (0, 200, 255), 2)
+
+    for index, point in points.items():
+        color = (0, 255, 0)
+        if index in FINGERTIPS:
+            color = (255, 0, 255)
+        if index in raised_fingers:
+            color = (255, 255, 0)
+        cv2.circle(frame, point, 5, color, cv2.FILLED)
+
+    return points.get(8)
+
+
+def encode_frame(frame) -> str:
+    success, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    if not success:
+        return ""
+
+    encoded = base64.b64encode(buffer).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
 
 
 async def broadcast(message: str) -> None:
@@ -123,8 +363,14 @@ async def handle_client(websocket, path=None):
     print(f"Client connected {path}. Total clients: {len(connected_clients)}")
 
     try:
-        async for _message in websocket:
-            pass
+        async for message in websocket:
+            try:
+                payload = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            if payload.get("type") == "reset":
+                game.reset()
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -150,6 +396,8 @@ async def mock_gesture_stream() -> None:
             "y": last_position["y"],
             "confidence": last_position["confidence"],
             "gesture": "mock",
+            "frame": "",
+            **game.state(),
         })
         await broadcast(message)
         await asyncio.sleep(0.033)
@@ -213,17 +461,28 @@ async def gesture_stream() -> None:
                 results = tracker.process(frame_rgb)
                 coords = extract_solutions_coords(results)
 
+            points = None
             if coords:
                 last_position = coords
             else:
                 coords = last_position.copy()
                 coords["confidence"] = 0.0
 
+            if tracker_mode == "tasks":
+                points = extract_tasks_points(result, frame.shape[1], frame.shape[0])
+            else:
+                points = extract_solutions_points(results, frame.shape[1], frame.shape[0])
+
+            cursor = draw_hand_landmarks(frame, points)
+            game.update(frame, cursor if coords["confidence"] > 0 else None)
+
             message = json.dumps({
                 "x": coords["x"],
                 "y": coords["y"],
                 "confidence": coords["confidence"],
                 "gesture": "pointing",
+                "frame": encode_frame(frame),
+                **game.state(),
             })
 
             await broadcast(message)
@@ -235,10 +494,10 @@ async def gesture_stream() -> None:
 
 
 async def main() -> None:
-    print("Starting GestureNinja backend on ws://0.0.0.0:8765")
+    print(f"Starting GestureNinja backend on ws://{HOST}:{PORT}")
 
     gesture_task = asyncio.create_task(gesture_stream())
-    async with websockets.serve(handle_client, "0.0.0.0", 8765):
+    async with websockets.serve(handle_client, HOST, PORT):
         try:
             await asyncio.gather(gesture_task)
         except KeyboardInterrupt:

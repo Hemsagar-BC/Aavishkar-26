@@ -30,9 +30,9 @@ const phonemeRounds = [
   { sound: "ch", correct: "CH", options: ["CH", "SH", "TH", "C"] },
   { sound: "ph", correct: "PH", options: ["PH", "FF", "F", "V"] },
   { sound: "wh", correct: "WH", options: ["WH", "W", "HW", "VW"] },
-  { sound: "ck", correct: "CK", options: ["CK", "K", "C", "QK"] },
-  { sound: "ng", correct: "NG", options: ["NG", "NK", "GN", "N"] },
-  { sound: "wr", correct: "WR", options: ["WR", "R", "RW", "OR"] },
+  // { sound: "ck", correct: "CK", options: ["CK", "K", "C", "QK"] },
+  // { sound: "ng", correct: "NG", options: ["NG", "NK", "GN", "N"] },
+  // { sound: "wr", correct: "WR", options: ["WR", "R", "RW", "OR"] },
 ];
 
 const wordList = [
@@ -41,13 +41,13 @@ const wordList = [
   { word: "friend", real: true },
   { word: "spanting", real: false },
   { word: "garden", real: true },
-  { word: "woogle", real: false },
-  { word: "journey", real: true },
-  { word: "frimbel", real: false },
-  { word: "whisper", real: true },
-  { word: "crumfle", real: false },
-  { word: "bridge", real: true },
-  { word: "pliven", real: false },
+  // { word: "woogle", real: false },
+  // { word: "journey", real: true },
+  // { word: "frimbel", real: false },
+  // { word: "whisper", real: true },
+  // { word: "crumfle", real: false },
+  // { word: "bridge", real: true },
+  // { word: "pliven", real: false },
 ];
 
 export default function Onboarding() {
@@ -72,7 +72,7 @@ export default function Onboarding() {
   // Task sub-state
   const [taskPhase, setTaskPhase] = useState("intro");
   const [taskData, setTaskData] = useState({ clicks: 0, hits: 0, misses: 0 });
-  const [timeLeft, setTimeLeft] = useState(15);
+  const [timeLeft, setTimeLeft] = useState(8);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Letter Spotter state
@@ -108,6 +108,8 @@ export default function Onboarding() {
   // Speak phoneme when Sound Match starts or round changes
   useEffect(() => {
     if (taskPhase === "playing" && currentTaskIndex === 1) {
+      const round = phonemeRounds[roundIndex];
+      if (!round) return;   // ← add this guard
       const utterance = new SpeechSynthesisUtterance(phonemeRounds[roundIndex].sound);
       utterance.rate = 0.8;
       window.speechSynthesis.cancel();
@@ -155,7 +157,7 @@ export default function Onboarding() {
 
   const startTask = () => {
     setTaskData({ clicks: 0, hits: 0, misses: 0 });
-    setTimeLeft(15);
+    setTimeLeft(8);
     setTappedCells({});
     setRoundIndex(0);
     setLastResult(null);
@@ -260,11 +262,11 @@ export default function Onboarding() {
             ←
           </button>
           <div className="flex-1">
-            <p className="text-primary text-sm mb-1">Question {currentQuestion + 1} of 10</p>
+            <p className="text-primary text-sm mb-1">Question {currentQuestion + 1} of 5</p>
             <div className="w-full bg-primary/10 rounded-full h-2">
               <div
                 className="bg-indigo-400 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${((currentQuestion + 1) / 10) * 100}%` }}
+                style={{ width: `${((currentQuestion + 1) / 5) * 100}%` }}
               />
             </div>
           </div>
@@ -303,10 +305,10 @@ export default function Onboarding() {
         {answers[q.id] && (
           <div className="flex justify-center mt-8">
             <button
-              onClick={() => (currentQuestion < 9 ? setCurrentQuestion(currentQuestion + 1) : setStep(3))}
+              onClick={() => (currentQuestion < 4 ? setCurrentQuestion(currentQuestion + 1) : setStep(3))}
               className="bg-primary hover:bg-primary/80 text-white px-10 py-3 rounded-xl font-semibold text-lg transition-all"
             >
-              {currentQuestion < 9 ? "Next →" : "Start Tasks →"}
+              {currentQuestion < 4 ? "Next →" : "Start Tasks →"}
             </button>
           </div>
         )}
@@ -329,7 +331,7 @@ export default function Onboarding() {
             <h2 className="text-3xl font-bold text-white mb-3 mt-4">{currentTask.title}</h2>
             <p className="text-muted-foreground mb-2">{currentTask.description}</p>
             <p className="text-lg text-white mb-8 font-medium">{currentTask.instruction}</p>
-            <p className="text-primary mb-6">⏱ 15 seconds</p>
+            <p className="text-primary mb-6">⏱ 8 seconds</p>
             <button
               onClick={startTask}
               className="bg-primary hover:bg-primary/80 text-white text-lg font-semibold px-10 py-3 rounded-xl transition-all hover:scale-105"
@@ -342,7 +344,7 @@ export default function Onboarding() {
     }
 
     // TIMER DISPLAY HELPER
-    const timerColor = timeLeft > 10 ? "text-white" : timeLeft > 5 ? "text-yellow-400" : "text-red-400 animate-pulse";
+    const timerColor = timeLeft > 5 ? "text-white" : timeLeft > 2 ? "text-yellow-400" : "text-red-400 animate-pulse";
 
     // TASK A — LETTER SPOTTER
     if (taskPhase === "playing" && currentTaskIndex === 0) {
@@ -387,6 +389,7 @@ export default function Onboarding() {
     // TASK B — SOUND MATCH
     if (taskPhase === "playing" && currentTaskIndex === 1) {
       const round = phonemeRounds[roundIndex];
+      if (!round) return null;
       return (
         <div className="min-h-screen flex flex-col items-center justify-center p-6 content-blur-card m-4">
           <div className={`text-6xl font-bold text-center mb-6 ${timerColor}`}>{timeLeft}</div>
@@ -424,7 +427,7 @@ export default function Onboarding() {
                   setLastResult(isCorrect ? "correct" : "wrong");
                   setTimeout(() => {
                     setLastResult(null);
-                    if (roundIndex < 7) {
+                    if (roundIndex < 4) {
                       setRoundIndex((prev) => prev + 1);
                     }
                   }, 600);
@@ -435,7 +438,7 @@ export default function Onboarding() {
               </button>
             ))}
           </div>
-          <p className="text-primary text-sm">{roundIndex + 1} / 8</p>
+          <p className="text-primary text-sm">{roundIndex + 1} / 5</p>
         </div>
       );
     }
@@ -443,6 +446,7 @@ export default function Onboarding() {
     // TASK C — REAL OR FAKE
     if (taskPhase === "playing" && currentTaskIndex === 2) {
       const currentWord = wordList[wordIndex];
+      if (!currentWord) return null;
       return (
         <div className="min-h-screen flex flex-col items-center justify-center p-6 content-blur-card m-4">
           <div className={`text-6xl font-bold text-center mb-6 ${timerColor}`}>{timeLeft}</div>
@@ -519,7 +523,7 @@ export default function Onboarding() {
                   setCurrentTaskIndex((prev) => prev + 1);
                   setTaskPhase("intro");
                   setTaskData({ clicks: 0, hits: 0, misses: 0 });
-                  setTimeLeft(15);
+                  setTimeLeft(8);
                   setTappedCells({});
                   setRoundIndex(0);
                   setLastResult(null);
