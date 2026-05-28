@@ -163,7 +163,12 @@ export default function OpenCvPage() {
     }
 
     if (video.readyState >= 2) {
+      // Mirror the camera feed to match the on-screen hand orientation.
+      ctx.save();
+      ctx.translate(CANVAS_WIDTH, 0);
+      ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      ctx.restore();
     } else {
       ctx.fillStyle = "#0b0b0f";
       ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
