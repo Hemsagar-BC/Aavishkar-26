@@ -16,8 +16,12 @@ type StreamMessage = {
   feedback?: string;
 };
 
-const WS_URL = process.env.NEXT_PUBLIC_GESTURE_WS_URL ?? "ws://localhost:8765";
-const IS_REMOTE_WS = !WS_URL.includes("localhost") && !WS_URL.includes("127.0.0.1");
+// const RAW_WS_URL =
+//   process.env.NEXT_PUBLIC_OPENCV_WS_URL || "wss://aavishkar-26-production.up.railway.app";
+// const WS_URL = RAW_WS_URL.includes("://") ? RAW_WS_URL : `wss://${RAW_WS_URL}`;
+
+const WS_URL = "ws://localhost:8765";
+const IS_LOCAL_WS = /^ws:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/.test(WS_URL);
 
 export default function OpenCvPage() {
   const socketRef = useRef<WebSocket | null>(null);
@@ -86,16 +90,16 @@ export default function OpenCvPage() {
     setError(null);
 
     try {
-      if (IS_REMOTE_WS) {
+      if (!IS_LOCAL_WS) {
+        setLogs([`Connecting to hosted OpenCV backend at ${WS_URL}`]);
         connectSocket();
         return;
       }
 
       const response = await fetch("/api/opencv/start", { method: "POST" });
       const data = await response.json();
-
       if (!response.ok || !data.ok) {
-        throw new Error(data.error || "Could not start the OpenCV backend.");
+        throw new Error(data.error || "Could not start the local OpenCV backend.");
       }
 
       setLogs(data.logs ?? []);
@@ -126,7 +130,8 @@ export default function OpenCvPage() {
     setFrame("");
 
     try {
-      if (IS_REMOTE_WS) {
+      if (!IS_LOCAL_WS) {
+        setLogs([`Disconnected from hosted OpenCV backend at ${WS_URL}`]);
         return;
       }
 
@@ -217,7 +222,7 @@ export default function OpenCvPage() {
                 ) : (
                   <WifiOff className="text-red-600 dark:text-red-300" size={16} />
                 )}
-                {isConnected ? "Live OpenCV stream" : "Connecting to OpenCV stream"}
+                {isConnected ? "Live OpenCV stream" : hasStarted ? "Connecting to OpenCV stream" : "OpenCV stream stopped"}
               </div>
               <span className="text-xs text-muted-foreground">{WS_URL}</span>
             </div>
@@ -286,6 +291,10 @@ export default function OpenCvPage() {
               {error ? (
                 <p className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-100">
                   {error}
+                </p>
+              ) : !hasStarted ? (
+                <p className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-3 text-sm text-cyan-700 dark:text-cyan-100">
+                  Camera is off. Press Start to launch the OpenCV backend.
                 </p>
               ) : (
                 <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-100">

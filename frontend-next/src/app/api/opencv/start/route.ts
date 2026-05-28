@@ -12,6 +12,10 @@ const globalForOpenCv = globalThis as typeof globalThis & {
   openCvGestureLog?: string[];
 };
 
+const OPENCV_HOST = "127.0.0.1";
+const OPENCV_PORT = 8765;
+const OPENCV_WS_URL = `ws://localhost:${OPENCV_PORT}`;
+
 function rememberLog(line: string) {
   globalForOpenCv.openCvGestureLog ??= [];
   globalForOpenCv.openCvGestureLog.push(line);
@@ -37,20 +41,26 @@ function isPortOpen(host: string, port: number) {
 export async function POST() {
   const existing = globalForOpenCv.openCvGestureProcess;
   if (existing && existing.exitCode === null) {
-    return NextResponse.json({
-      ok: true,
-      status: "already-running",
-      wsUrl: "ws://localhost:8765",
-      logs: globalForOpenCv.openCvGestureLog ?? [],
-    });
+    if (!(await isPortOpen(OPENCV_HOST, OPENCV_PORT))) {
+      existing.kill();
+      globalForOpenCv.openCvGestureProcess = undefined;
+      rememberLog(`Restarting OpenCV backend because the process was alive but ${OPENCV_WS_URL} was not listening.`);
+    } else {
+      return NextResponse.json({
+        ok: true,
+        status: "already-running",
+        wsUrl: OPENCV_WS_URL,
+        logs: globalForOpenCv.openCvGestureLog ?? [],
+      });
+    }
   }
 
-  if (await isPortOpen("127.0.0.1", 8765)) {
-    rememberLog("Gesture backend is already listening on ws://localhost:8765");
+  if (await isPortOpen(OPENCV_HOST, OPENCV_PORT)) {
+    rememberLog(`Gesture backend is already listening on ${OPENCV_WS_URL}`);
     return NextResponse.json({
       ok: true,
       status: "already-listening",
-      wsUrl: "ws://localhost:8765",
+      wsUrl: OPENCV_WS_URL,
       logs: globalForOpenCv.openCvGestureLog ?? [],
     });
   }
@@ -81,7 +91,11 @@ export async function POST() {
     : process.platform === "win32" ? "python" : "python3";
   const child = spawn(pythonCommand, ["ws_server.py"], {
     cwd: gestureBackendDir,
-    env: process.env,
+    env: {
+      ...process.env,
+      HOST: OPENCV_HOST,
+      PORT: String(OPENCV_PORT),
+    },
     stdio: "pipe",
     windowsHide: true,
   });
@@ -96,7 +110,7 @@ export async function POST() {
   return NextResponse.json({
     ok: true,
     status: "started",
-    wsUrl: "ws://localhost:8765",
+    wsUrl: OPENCV_WS_URL,
     logs: globalForOpenCv.openCvGestureLog ?? [],
   });
 }
