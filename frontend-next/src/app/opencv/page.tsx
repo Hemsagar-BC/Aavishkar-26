@@ -400,23 +400,16 @@ export default function OpenCvPage() {
     resetGameState();
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, facingMode: "user" },
-      });
-      mediaStreamRef.current = stream;
-
       const video = videoRef.current;
       if (!video) {
         throw new Error("Camera element not ready.");
       }
 
-      video.srcObject = stream;
       video.playsInline = true;
       video.muted = true;
-      await video.play();
 
-      const handsModule = await import(/* webpackIgnore: true */ "@mediapipe/hands");
-      const cameraUtils = await import(/* webpackIgnore: true */ "@mediapipe/camera_utils");
+      const handsModule = await import("@mediapipe/hands");
+      const cameraUtils = await import("@mediapipe/camera_utils");
 
       const hands = new handsModule.Hands({
         locateFile: (file: string) =>
@@ -468,6 +461,7 @@ export default function OpenCvPage() {
       });
       cameraRef.current = camera;
       await camera.start();
+      mediaStreamRef.current = video.srcObject as MediaStream | null;
 
       runningRef.current = true;
       setIsConnected(true);
