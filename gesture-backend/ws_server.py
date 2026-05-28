@@ -84,12 +84,11 @@ class GestureSliceGame:
 
     def draw_ui(self, frame) -> None:
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (CANVAS_WIDTH, 80), (30, 30, 30), -1)
+        cv2.rectangle(overlay, (0, 0), (CANVAS_WIDTH, 58), (30, 30, 30), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
-        cv2.putText(frame, "OpenCV Gesture Slice", (135, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 3)
-        cv2.putText(frame, f"Score: {self.score}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Misses: {self.missed}/{MAX_MISSES}", (405, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(frame, f"Score: {self.score}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame, f"Misses: {self.missed}/{MAX_MISSES}", (405, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     def draw_fruits(self, frame) -> None:
         remove_list = []
@@ -164,19 +163,35 @@ class GestureSliceGame:
             return
 
         overlay = frame.copy()
-        cv2.rectangle(overlay, (80, 120), (560, 360), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        cv2.putText(frame, "GAME OVER", (180, 200), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 5)
-        cv2.putText(frame, f"Final Score: {self.score}", (180, 280), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-        cv2.putText(frame, "Click Restart", (200, 340), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
+        panel_width = 430
+        panel_height = 210
+        panel_left = (CANVAS_WIDTH - panel_width) // 2
+        panel_top = (CANVAS_HEIGHT - panel_height) // 2
+        panel_right = panel_left + panel_width
+        panel_bottom = panel_top + panel_height
+
+        cv2.rectangle(overlay, (panel_left, panel_top), (panel_right, panel_bottom), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+        cv2.rectangle(frame, (panel_left, panel_top), (panel_right, panel_bottom), (255, 255, 255), 2)
+
+        def centered_text(text: str, y: int, scale: float, color: tuple, thickness: int) -> None:
+            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+            x = panel_left + (panel_width - text_size[0]) // 2
+            cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+
+        centered_text("GAME OVER", panel_top + 70, 1.7, (0, 0, 255), 5)
+        centered_text(f"Final Score: {self.score}", panel_top + 130, 1.0, (255, 255, 255), 3)
+        centered_text("Click Restart", panel_top + 178, 0.85, (0, 255, 255), 3)
 
     def update(self, frame, cursor: Optional[Tuple[int, int]]) -> None:
         if self.missed >= MAX_MISSES:
             self.game_over = True
 
-        self.maybe_spawn()
         self.draw_ui(frame)
-        self.draw_fruits(frame)
+
+        if not self.game_over:
+            self.maybe_spawn()
+            self.draw_fruits(frame)
 
         if cursor and not self.game_over:
             cursor_x, cursor_y = cursor
@@ -208,9 +223,9 @@ def ensure_model_file() -> None:
     if os.path.exists(MODEL_PATH):
         return
 
-    print("Downloading MediaPipe model...")
+    print("Downloading MediaPipe model...", flush=True)
     urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    print("Download complete!")
+    print("Download complete!", flush=True)
 
 
 def clamp01(value: float) -> float:
@@ -247,7 +262,7 @@ def get_tasks_tracker(mp) -> Optional[Tuple[str, object]]:
         tracker = HandLandmarker.create_from_options(options)
         return "tasks", tracker
     except Exception as exc:
-        print(f"MediaPipe tasks init failed: {exc}")
+        print(f"MediaPipe tasks init failed: {exc}", flush=True)
         return None
 
 
@@ -265,7 +280,7 @@ def get_solutions_tracker(mp) -> Optional[Tuple[str, object]]:
         )
         return "solutions", tracker
     except Exception as exc:
-        print(f"MediaPipe solutions init failed: {exc}")
+        print(f"MediaPipe solutions init failed: {exc}", flush=True)
         return None
 
 
@@ -360,7 +375,7 @@ async def handle_client(websocket, path=None):
     if path is None:
         path = getattr(websocket, "path", "")
     connected_clients.add(websocket)
-    print(f"Client connected {path}. Total clients: {len(connected_clients)}")
+    print(f"Client connected {path}. Total clients: {len(connected_clients)}", flush=True)
 
     try:
         async for message in websocket:
@@ -375,7 +390,7 @@ async def handle_client(websocket, path=None):
         pass
     finally:
         connected_clients.discard(websocket)
-        print(f"Client disconnected. Total clients: {len(connected_clients)}")
+        print(f"Client disconnected. Total clients: {len(connected_clients)}", flush=True)
 
 
 async def mock_gesture_stream() -> None:
@@ -409,7 +424,7 @@ async def gesture_stream() -> None:
     try:
         import mediapipe as mp
     except Exception as exc:
-        print(f"MediaPipe import failed: {exc}")
+        print(f"MediaPipe import failed: {exc}", flush=True)
         mp = None
 
     tracker_mode = None
@@ -424,13 +439,13 @@ async def gesture_stream() -> None:
                 tracker_mode, tracker = solutions_tracker
 
     if tracker is None:
-        print("MediaPipe unavailable. Using mock stream.")
+        print("MediaPipe unavailable. Using mock stream.", flush=True)
         await mock_gesture_stream()
         return
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Camera not found. Using mock stream.")
+        print("Camera not found. Using mock stream.", flush=True)
         await mock_gesture_stream()
         return
 
@@ -494,14 +509,15 @@ async def gesture_stream() -> None:
 
 
 async def main() -> None:
-    print(f"Starting GestureNinja backend on ws://{HOST}:{PORT}")
+    print(f"Starting GestureNinja backend on ws://{HOST}:{PORT}", flush=True)
 
-    gesture_task = asyncio.create_task(gesture_stream())
     async with websockets.serve(handle_client, HOST, PORT):
+        print(f"GestureNinja websocket is listening on ws://{HOST}:{PORT}", flush=True)
+        gesture_task = asyncio.create_task(gesture_stream())
         try:
             await asyncio.gather(gesture_task)
         except KeyboardInterrupt:
-            print("Shutting down...")
+            print("Shutting down...", flush=True)
             global running
             running = False
 
