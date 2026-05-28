@@ -74,6 +74,8 @@ export default function OpenCvPage() {
   const handsRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
   const rafRef = useRef<number | null>(null);
+  const handLoopRef = useRef<number | null>(null);
+  const handBusyRef = useRef(false);
   const runningRef = useRef(false);
   const lastSpawnRef = useRef(0);
   const lastUiUpdateRef = useRef(0);
@@ -121,6 +123,11 @@ export default function OpenCvPage() {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
+    }
+
+    if (handLoopRef.current !== null) {
+      cancelAnimationFrame(handLoopRef.current);
+      handLoopRef.current = null;
     }
 
     if (cameraRef.current?.stop) {
@@ -389,6 +396,28 @@ export default function OpenCvPage() {
     rafRef.current = requestAnimationFrame(renderLoop);
   }, [drawFrame]);
 
+  const handLoop = useCallback(() => {
+    if (!runningRef.current) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const hands = handsRef.current;
+
+    if (video && hands && video.readyState >= 2 && !handBusyRef.current) {
+      handBusyRef.current = true;
+      hands.send({ image: video })
+        .catch(() => {
+          // Ignore per-frame errors; camera stays live.
+        })
+        .finally(() => {
+          handBusyRef.current = false;
+        });
+    }
+
+    handLoopRef.current = requestAnimationFrame(handLoop);
+  }, []);
+
   const startBackend = useCallback(async () => {
     if (isStarting || isConnected) {
       return;
@@ -408,8 +437,14 @@ export default function OpenCvPage() {
       video.playsInline = true;
       video.muted = true;
 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, facingMode: "user" },
+      });
+      mediaStreamRef.current = stream;
+      video.srcObject = stream;
+      await video.play();
+
       const handsModule = await import("@mediapipe/hands");
-      const cameraUtils = await import("@mediapipe/camera_utils");
 
       const hands = new handsModule.Hands({
         locateFile: (file: string) =>
@@ -417,6 +452,7 @@ export default function OpenCvPage() {
       });
 
       hands.setOptions({
+        selfieMode: true,
         maxNumHands: 1,
         modelComplexity: 1,
         minDetectionConfidence: 0.7,
@@ -449,23 +485,10 @@ export default function OpenCvPage() {
 
       handsRef.current = hands;
 
-      const camera = new cameraUtils.Camera(video, {
-        onFrame: async () => {
-          if (!handsRef.current) {
-            return;
-          }
-          await handsRef.current.send({ image: video });
-        },
-        width: CANVAS_WIDTH,
-        height: CANVAS_HEIGHT,
-      });
-      cameraRef.current = camera;
-      await camera.start();
-      mediaStreamRef.current = video.srcObject as MediaStream | null;
-
       runningRef.current = true;
       setIsConnected(true);
       renderLoop();
+      handLoop();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message || "Could not access the camera.");
