@@ -46,6 +46,9 @@ type GameState = {
 const CANVAS_WIDTH = 640;
 const CANVAS_HEIGHT = 480;
 const MAX_MISSES = 5;
+const TOP_BAR_HEIGHT = 70;
+const TOP_BAR_PADDING_X = 16;
+const TOP_BAR_SCORE_Y = 44;
 const FRUIT_LETTERS = ["A", "B", "C", "D", "E"];
 const HAND_CONNECTIONS: Array<[number, number]> = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -212,18 +215,18 @@ export default function OpenCvPage() {
 
     ctx.save();
     ctx.fillStyle = "rgba(30, 30, 30, 0.6)";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, 80);
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 26px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Gesture Slice Trainer", CANVAS_WIDTH / 2, 40);
+    ctx.fillRect(0, 0, CANVAS_WIDTH, TOP_BAR_HEIGHT);
     ctx.font = "bold 18px system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.fillStyle = "#22c55e";
-    ctx.fillText(`Score: ${game.score}`, 20, 68);
+    ctx.fillText(`Score: ${game.score}`, TOP_BAR_PADDING_X, TOP_BAR_SCORE_Y);
     ctx.textAlign = "right";
     ctx.fillStyle = "#ef4444";
-    ctx.fillText(`Misses: ${game.missed}/${MAX_MISSES}`, CANVAS_WIDTH - 20, 68);
+    ctx.fillText(
+      `Misses: ${Math.min(game.missed, MAX_MISSES)}/${MAX_MISSES}`,
+      CANVAS_WIDTH - TOP_BAR_PADDING_X,
+      TOP_BAR_SCORE_Y,
+    );
     ctx.restore();
 
     const removeIndices: number[] = [];
@@ -257,8 +260,8 @@ export default function OpenCvPage() {
 
       if (fruit.y > CANVAS_HEIGHT + fruit.radius) {
         removeIndices.push(index);
-        if (fruit.type === "fruit") {
-          game.missed += 1;
+        if (fruit.type === "fruit" && !game.gameOver) {
+          game.missed = Math.min(game.missed + 1, MAX_MISSES);
         }
       }
     });
@@ -280,7 +283,9 @@ export default function OpenCvPage() {
         fruit.sliced = true;
         if (fruit.type === "bomb") {
           game.score -= 5;
-          game.missed += 1;
+          if (!game.gameOver) {
+            game.missed = Math.min(game.missed + 1, MAX_MISSES);
+          }
           game.feedback = "BOMB HIT!";
           game.feedbackTimer = 30;
         } else {
@@ -384,7 +389,7 @@ export default function OpenCvPage() {
         confidence: hand.confidence,
         gesture: hand.confidence > 0.2 ? "pointing" : "none",
         score: game.score,
-        missed: game.missed,
+        missed: Math.min(game.missed, MAX_MISSES),
         maxMisses: MAX_MISSES,
         gameOver: game.gameOver,
         feedback: game.feedback,
@@ -629,7 +634,7 @@ export default function OpenCvPage() {
                 <div className="rounded-lg bg-muted p-3">
                   <dt className="text-muted-foreground">Misses</dt>
                   <dd className="text-2xl font-black text-red-600 dark:text-red-300">
-                    {stream.missed ?? 0}/{stream.maxMisses ?? MAX_MISSES}
+                    {Math.min(stream.missed ?? 0, MAX_MISSES)}/{stream.maxMisses ?? MAX_MISSES}
                   </dd>
                 </div>
                 <div className="rounded-lg bg-muted p-3">
